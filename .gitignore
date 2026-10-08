@@ -1,0 +1,19 @@
+# Maven build output
+/target/
+
+# IntelliJ IDEA
+/.idea/
+*.iml
+/out/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+/src/main/resources/application-local.properties
+/src/main/resources/application-local.yml
+
+# Logs and operating system files
+*.log
+.DS_Store
+Thumbs.db
