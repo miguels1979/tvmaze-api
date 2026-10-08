@@ -1,5 +1,9 @@
 package com.example.tvmazeapi.exception;
 
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Positive;
+import org.springframework.beans.TypeMismatchException;
+import org.springframework.core.MethodParameter;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
@@ -7,13 +11,24 @@ import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.method.annotation.HandlerMethodValidationException;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
+
+    @ExceptionHandler(ShowNotFoundException.class)
+    public ProblemDetail handleShowNotFoundException(ShowNotFoundException exception) {
+        return ProblemDetail.forStatusAndDetail(
+                HttpStatus.NOT_FOUND,
+                "No se encontró la serie solicitada."
+        );
+    }
 
     @ExceptionHandler(TvMazeClientException.class)
     public ProblemDetail handleTvMazeClientException(TvMazeClientException exception) {
@@ -42,7 +57,7 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     ) {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(
                 HttpStatus.BAD_REQUEST,
-                "El parámetro search_query es obligatorio."
+                "El parámetro " + exception.getParameterName() + " es obligatorio."
         );
         return handleExceptionInternal(exception, problem, headers, HttpStatus.BAD_REQUEST, request);
     }
@@ -66,8 +81,65 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(
                 HttpStatus.BAD_REQUEST,
-                "El parámetro search_query no debe estar vacío ni contener únicamente espacios."
+                validationDetail(exception)
         );
         return handleExceptionInternal(exception, problem, headers, HttpStatus.BAD_REQUEST, request);
+    }
+
+    @Override
+    protected ResponseEntity<Object> handleTypeMismatch(
+            TypeMismatchException exception,
+            HttpHeaders headers,
+            HttpStatusCode status,
+            WebRequest request
+    ) {
+        String detail = "Un parámetro de la solicitud tiene un tipo no válido.";
+        if (exception instanceof MethodArgumentTypeMismatchException mismatch) {
+            detail = "El parámetro " + mismatch.getName() + " tiene un tipo no válido.";
+            if (Integer.class.equals(mismatch.getRequiredType())) {
+                detail = "El parámetro " + mismatch.getName() + " debe ser un entero válido.";
+            }
+        }
+
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, detail);
+        return handleExceptionInternal(exception, problem, headers, HttpStatus.BAD_REQUEST, request);
+    }
+
+    private String validationDetail(HandlerMethodValidationException exception) {
+        for (var result : exception.getParameterValidationResults()) {
+            MethodParameter parameter = result.getMethodParameter();
+            String name = requestParameterName(parameter);
+            if (parameter.hasParameterAnnotation(NotBlank.class)) {
+                return "El parámetro " + name + " no debe estar vacío ni contener únicamente espacios.";
+            }
+            if (parameter.hasParameterAnnotation(Positive.class)) {
+                return "El parámetro " + name + " debe ser mayor que cero.";
+            }
+        }
+        return "Uno o más parámetros de la solicitud no cumplen las restricciones requeridas.";
+    }
+
+    private String requestParameterName(MethodParameter parameter) {
+        RequestParam requestParam = parameter.getParameterAnnotation(RequestParam.class);
+        if (requestParam != null) {
+            if (!requestParam.name().isBlank()) {
+                return requestParam.name();
+            }
+            if (!requestParam.value().isBlank()) {
+                return requestParam.value();
+            }
+        }
+
+        PathVariable pathVariable = parameter.getParameterAnnotation(PathVariable.class);
+        if (pathVariable != null) {
+            if (!pathVariable.name().isBlank()) {
+                return pathVariable.name();
+            }
+            if (!pathVariable.value().isBlank()) {
+                return pathVariable.value();
+            }
+        }
+
+        return "de la solicitud";
     }
 }

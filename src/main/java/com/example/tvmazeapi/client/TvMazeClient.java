@@ -3,6 +3,9 @@ package com.example.tvmazeapi.client;
 import com.example.tvmazeapi.dto.external.TvMazeSearchResult;
 
 import com.example.tvmazeapi.exception.TvMazeClientException;
+import com.example.tvmazeapi.exception.ShowNotFoundException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.MediaType;
 import org.springframework.http.converter.HttpMessageConversionException;
@@ -58,6 +61,66 @@ public class TvMazeClient {
 
             return List.copyOf(results);
         } catch (RestClientResponseException exception) {
+            TvMazeClientException.Reason reason = exception.getStatusCode().value() == 429
+                    ? TvMazeClientException.Reason.RATE_LIMITED
+                    : TvMazeClientException.Reason.BAD_RESPONSE;
+            throw new TvMazeClientException(
+                    reason,
+                    "TVMaze returned HTTP " + exception.getStatusCode().value(),
+                    exception
+            );
+        } catch (ResourceAccessException exception) {
+            boolean timeout = isTimeout(exception);
+            throw new TvMazeClientException(
+                    timeout ? TvMazeClientException.Reason.TIMEOUT
+                            : TvMazeClientException.Reason.UNAVAILABLE,
+                    timeout ? "TVMaze request timed out" : "Unable to connect to TVMaze",
+                    exception
+            );
+        } catch (RestClientException | HttpMessageConversionException exception) {
+            throw new TvMazeClientException(
+                    TvMazeClientException.Reason.BAD_RESPONSE,
+                    "Unable to interpret the TVMaze response",
+                    exception
+            );
+        }
+    }
+
+    public ObjectNode getShow(Integer showId) {
+        if (showId == null || showId <= 0) {
+            throw new IllegalArgumentException("Show ID must be a positive integer");
+        }
+
+        try {
+            ObjectNode show = restClient.get()
+                    .uri("/shows/{show_id}", showId)
+                    .accept(MediaType.APPLICATION_JSON)
+                    .retrieve()
+                    .body(ObjectNode.class);
+
+            if (show == null) {
+                throw new TvMazeClientException(
+                        TvMazeClientException.Reason.BAD_RESPONSE,
+                        "TVMaze returned an empty show response body"
+                );
+            }
+
+            JsonNode returnedId = show.path("id");
+            if (!returnedId.isIntegralNumber()
+                    || !returnedId.canConvertToInt()
+                    || returnedId.intValue() != showId) {
+                throw new TvMazeClientException(
+                        TvMazeClientException.Reason.BAD_RESPONSE,
+                        "TVMaze returned a show with an invalid or unexpected ID"
+                );
+            }
+
+            return show;
+        } catch (RestClientResponseException exception) {
+            if (exception.getStatusCode().value() == 404) {
+                throw new ShowNotFoundException(showId, exception);
+            }
+
             TvMazeClientException.Reason reason = exception.getStatusCode().value() == 429
                     ? TvMazeClientException.Reason.RATE_LIMITED
                     : TvMazeClientException.Reason.BAD_RESPONSE;

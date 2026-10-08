@@ -1,6 +1,13 @@
 package com.example.tvmazeapi.service;
 
 import com.example.tvmazeapi.exception.TvMazeClientException;
+import com.example.tvmazeapi.exception.ShowNotFoundException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import com.example.tvmazeapi.client.TvMazeClient;
 import com.example.tvmazeapi.dto.external.TvMazeSearchResult;
 import com.example.tvmazeapi.dto.response.ShowSearchResponse;
@@ -67,6 +74,51 @@ class ShowServiceTest {
         when(client.searchShows("girls")).thenReturn(List.of(new TvMazeSearchResult(show)));
         when(mapper.toResponse(show)).thenThrow(error);
         assertThatThrownBy(() -> service.search("girls")).isSameAs(error);
+    }
+
+    @Test
+    void getsShowOnceAndReturnsSameUnmodifiedObject() throws Exception {
+        ObjectNode show = (ObjectNode) new ObjectMapper().readTree("""
+                {"id":1,"summary":"<p>HTML</p>","network":null,
+                 "additional":{"values":[1,null,{"enabled":true}]}}
+                """);
+        ObjectNode snapshot = show.deepCopy();
+        when(client.getShow(1)).thenReturn(show);
+
+        assertThat(service.getShow(1)).isSameAs(show).isEqualTo(snapshot);
+
+        verify(client, times(1)).getShow(1);
+        verifyNoMoreInteractions(client);
+        verifyNoInteractions(mapper);
+    }
+
+    @Test
+    void propagatesShowNotFoundUnchanged() {
+        var error = new ShowNotFoundException(1);
+        when(client.getShow(1)).thenThrow(error);
+        assertThatThrownBy(() -> service.getShow(1)).isSameAs(error);
+        verify(client).getShow(1);
+        verifyNoMoreInteractions(client);
+        verifyNoInteractions(mapper);
+    }
+
+    @ParameterizedTest
+    @EnumSource(TvMazeClientException.Reason.class)
+    void propagatesShowIntegrationErrorUnchanged(TvMazeClientException.Reason reason) {
+        var error = new TvMazeClientException(reason, "upstream diagnostic");
+        when(client.getShow(1)).thenThrow(error);
+        assertThatThrownBy(() -> service.getShow(1)).isSameAs(error);
+        verify(client).getShow(1);
+        verifyNoMoreInteractions(client);
+        verifyNoInteractions(mapper);
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(ints = {0, -1, Integer.MIN_VALUE})
+    void rejectsInvalidShowIdsWithoutCallingDependencies(Integer showId) {
+        assertThatThrownBy(() -> service.getShow(showId)).isInstanceOf(IllegalArgumentException.class);
+        verifyNoInteractions(client, mapper);
     }
 
     @Test
