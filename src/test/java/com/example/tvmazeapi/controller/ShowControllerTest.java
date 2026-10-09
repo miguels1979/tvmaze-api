@@ -3,6 +3,7 @@ package com.example.tvmazeapi.controller;
 import com.example.tvmazeapi.dto.response.ShowSearchResponse;
 
 import com.example.tvmazeapi.exception.GlobalExceptionHandler;
+import com.example.tvmazeapi.exception.ShowCacheException;
 import com.example.tvmazeapi.exception.ShowNotFoundException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -149,6 +150,45 @@ class ShowControllerTest {
                 .andExpect(content().string(not(containsString("credential"))))
                 .andExpect(content().string(not(containsString("IllegalStateException"))));
         verify(service).getShow(1);
+    }
+
+    @ParameterizedTest
+    @EnumSource(ShowCacheException.Reason.class)
+    void mapsCacheErrorsWithoutLeakingInternals(ShowCacheException.Reason reason) throws Exception {
+        String privateDiagnostic = "TECHNICAL mongodb+srv://private_user:private_password@internal.example/tvmaze"
+                + " stored JSON: {\"secretField\":\"privatePayload\"}";
+        when(service.getShow(1)).thenThrow(new ShowCacheException(reason, privateDiagnostic,
+                new IllegalStateException("INTERNAL cause details")));
+        int expectedStatus = reason == ShowCacheException.Reason.UNAVAILABLE ? 503 : 500;
+        String expectedDetail = reason == ShowCacheException.Reason.UNAVAILABLE
+                ? "El almacenamiento de series no está disponible temporalmente."
+                : "No fue posible recuperar correctamente la serie almacenada.";
+        String expectedTitle = reason == ShowCacheException.Reason.UNAVAILABLE
+                ? "Service Unavailable" : "Internal Server Error";
+
+        mvc.perform(get("/api/shows/1"))
+                .andExpect(status().is(expectedStatus))
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.status").value(expectedStatus))
+                .andExpect(jsonPath("$.detail").value(expectedDetail))
+                .andExpect(jsonPath("$.title").value(expectedTitle))
+                .andExpect(jsonPath("$.type").value("about:blank"))
+                .andExpect(jsonPath("$.instance").value("/api/shows/1"))
+                .andExpect(jsonPath("$", aMapWithSize(5)))
+                .andExpect(content().string(not(containsString("TECHNICAL"))))
+                .andExpect(content().string(not(containsString("mongodb+srv"))))
+                .andExpect(content().string(not(containsString("private_user"))))
+                .andExpect(content().string(not(containsString("private_password"))))
+                .andExpect(content().string(not(containsString("internal.example"))))
+                .andExpect(content().string(not(containsString("secretField"))))
+                .andExpect(content().string(not(containsString("privatePayload"))))
+                .andExpect(content().string(not(containsString("INTERNAL"))))
+                .andExpect(content().string(not(containsString("IllegalStateException"))))
+                .andExpect(jsonPath("$.trace").doesNotExist())
+                .andExpect(jsonPath("$.exception").doesNotExist())
+                .andExpect(jsonPath("$.cause").doesNotExist());
+        verify(service).getShow(1);
+        verifyNoMoreInteractions(service);
     }
 
     @Test

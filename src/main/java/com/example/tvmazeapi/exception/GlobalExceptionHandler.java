@@ -22,6 +22,21 @@ import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExcep
 @RestControllerAdvice
 public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 
+    @ExceptionHandler(ShowCacheException.class)
+    public ProblemDetail handleShowCacheException(ShowCacheException exception) {
+        HttpStatus status = switch (exception.getReason()) {
+            case UNAVAILABLE -> HttpStatus.SERVICE_UNAVAILABLE;
+            case INVALID_DATA -> HttpStatus.INTERNAL_SERVER_ERROR;
+        };
+
+        String detail = switch (exception.getReason()) {
+            case UNAVAILABLE -> "El almacenamiento de series no está disponible temporalmente.";
+            case INVALID_DATA -> "No fue posible recuperar correctamente la serie almacenada.";
+        };
+
+        return ProblemDetail.forStatusAndDetail(status, detail);
+    }
+
     @ExceptionHandler(ShowNotFoundException.class)
     public ProblemDetail handleShowNotFoundException(ShowNotFoundException exception) {
         return ProblemDetail.forStatusAndDetail(
