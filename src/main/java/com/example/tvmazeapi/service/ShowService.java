@@ -4,6 +4,7 @@ import com.example.tvmazeapi.client.TvMazeClient;
 import com.example.tvmazeapi.document.CachedShowDocument;
 import com.example.tvmazeapi.exception.ShowCacheException;
 import com.example.tvmazeapi.mapper.ShowCacheMapper;
+import com.example.tvmazeapi.mapper.ShowDetailMapper;
 import com.example.tvmazeapi.repository.CachedShowRepository;
 import com.example.tvmazeapi.dto.response.ShowSearchResponse;
 import com.example.tvmazeapi.mapper.ShowSearchMapper;
@@ -23,15 +24,17 @@ public class ShowService {
     private final CachedShowRepository cachedShowRepository;
     private final ShowCacheMapper showCacheMapper;
     private final CommentQueryService commentQueryService;
+    private final ShowDetailMapper showDetailMapper;
 
     public ShowService(TvMazeClient tvMazeClient, ShowSearchMapper showSearchMapper,
                        CachedShowRepository cachedShowRepository, ShowCacheMapper showCacheMapper,
-                       CommentQueryService commentQueryService) {
+                       CommentQueryService commentQueryService, ShowDetailMapper showDetailMapper) {
         this.tvMazeClient = tvMazeClient;
         this.showSearchMapper = showSearchMapper;
         this.cachedShowRepository = cachedShowRepository;
         this.showCacheMapper = showCacheMapper;
         this.commentQueryService = commentQueryService;
+        this.showDetailMapper = showDetailMapper;
     }
 
     public List<ShowSearchResponse> search(String searchQuery) {
@@ -59,6 +62,13 @@ public class ShowService {
             throw new IllegalArgumentException("Show ID must be a positive integer");
         }
 
+        ObjectNode originalShow = resolveShow(showId);
+        var commentsByShowId = commentQueryService.findByShowIds(List.of(showId));
+        return showDetailMapper.toResponse(originalShow,
+                commentsByShowId.getOrDefault(showId, List.of()));
+    }
+
+    private ObjectNode resolveShow(Integer showId) {
         Optional<CachedShowDocument> cachedShow = findCachedShow(showId);
         if (cachedShow.isPresent()) {
             return showCacheMapper.toShow(showId, cachedShow.get());

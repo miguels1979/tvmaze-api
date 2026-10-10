@@ -5,6 +5,7 @@ import com.example.tvmazeapi.exception.ShowNotFoundException;
 import com.example.tvmazeapi.exception.ShowCacheException;
 import com.example.tvmazeapi.document.CachedShowDocument;
 import com.example.tvmazeapi.mapper.ShowCacheMapper;
+import com.example.tvmazeapi.mapper.ShowDetailMapper;
 import com.example.tvmazeapi.repository.CachedShowRepository;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.DuplicateKeyException;
@@ -15,6 +16,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import com.example.tvmazeapi.client.TvMazeClient;
 import com.example.tvmazeapi.dto.external.TvMazeSearchResult;
 import com.example.tvmazeapi.dto.response.ShowSearchResponse;
@@ -26,11 +28,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
+import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -42,11 +46,12 @@ class ShowServiceTest {
     @Mock private CachedShowRepository repository;
     @Mock private ShowCacheMapper cacheMapper;
     @Mock private CommentQueryService commentQueryService;
+    @Spy private ShowDetailMapper detailMapper = new ShowDetailMapper(new ObjectMapper());
     @InjectMocks private ShowService service;
 
     @AfterEach
     void verifiesNoUnexpectedCacheInteractions() {
-        verifyNoMoreInteractions(repository, cacheMapper, commentQueryService);
+        verifyNoMoreInteractions(repository, cacheMapper, commentQueryService, detailMapper);
     }
 
     @Test
@@ -174,8 +179,9 @@ class ShowServiceTest {
         verifyNoInteractions(commentQueryService);
     }
 
-    @Test
-    void getsShowOnceAndReturnsSameUnmodifiedObject() throws Exception {
+    @ParameterizedTest
+    @MethodSource("detailComments")
+    void getsShowOncePersistsOriginalThenReturnsEnrichedCopy(List<CommentResponse> comments) throws Exception {
         ObjectNode show = (ObjectNode) new ObjectMapper().readTree("""
                 {"id":1,"summary":"<p>HTML</p>","network":null,
                  "additional":{"values":[1,null,{"enabled":true}]}}
@@ -185,14 +191,20 @@ class ShowServiceTest {
         when(repository.findById(1)).thenReturn(Optional.empty());
         when(client.getShow(1)).thenReturn(show);
         when(cacheMapper.toDocument(1, show)).thenReturn(document);
+        when(commentQueryService.findByShowIds(List.of(1)))
+                .thenReturn(comments.isEmpty() ? Map.of() : Map.of(1, comments));
 
-        assertThat(service.getShow(1)).isSameAs(show).isEqualTo(snapshot);
+        assertEnrichedCopy(service.getShow(1), show, snapshot, comments);
+        assertThat(document.showJson()).isEqualTo(snapshot.toString());
+        assertThat(new ObjectMapper().readTree(document.showJson()).has("comments")).isFalse();
 
-        var order = inOrder(repository, client, cacheMapper);
+        var order = inOrder(repository, client, cacheMapper, commentQueryService, detailMapper);
         order.verify(repository).findById(1);
         order.verify(client).getShow(1);
         order.verify(cacheMapper).toDocument(1, show);
         order.verify(repository).insert(document);
+        order.verify(commentQueryService).findByShowIds(List.of(1));
+        order.verify(detailMapper).toResponse(show, comments);
         verifyNoMoreInteractions(client);
         verifyNoInteractions(mapper);
     }
@@ -240,8 +252,9 @@ class ShowServiceTest {
         verifyNoInteractions(client, mapper, repository, cacheMapper);
     }
 
-    @Test
-    void returnsCacheHitWithoutCallingProvider() throws Exception {
+    @ParameterizedTest
+    @MethodSource("detailComments")
+    void returnsEnrichedCacheHitWithoutCallingProvider(List<CommentResponse> comments) throws Exception {
         ObjectNode show = (ObjectNode) new ObjectMapper().readTree("""
                 {"id":1,"summary":"<p>Niña 日本語</p>","network":null,
                  "extra":{"values":[1,null,{"enabled":true}]}}
@@ -250,12 +263,17 @@ class ShowServiceTest {
         var document = new CachedShowDocument(1, show.toString());
         when(repository.findById(1)).thenReturn(Optional.of(document));
         when(cacheMapper.toShow(1, document)).thenReturn(show);
+        when(commentQueryService.findByShowIds(List.of(1)))
+                .thenReturn(comments.isEmpty() ? Map.of() : Map.of(1, comments));
 
-        assertThat(service.getShow(1)).isSameAs(show).isEqualTo(snapshot);
+        assertEnrichedCopy(service.getShow(1), show, snapshot, comments);
+        assertThat(document.showJson()).isEqualTo(snapshot.toString());
 
-        var order = inOrder(repository, cacheMapper);
+        var order = inOrder(repository, cacheMapper, commentQueryService, detailMapper);
         order.verify(repository).findById(1);
         order.verify(cacheMapper).toShow(1, document);
+        order.verify(commentQueryService).findByShowIds(List.of(1));
+        order.verify(detailMapper).toResponse(show, comments);
         verifyNoInteractions(client, mapper);
     }
 
@@ -322,17 +340,23 @@ class ShowServiceTest {
         when(repository.insert(document)).thenThrow(new DuplicateKeyException("duplicate ID"));
         when(repository.findById(1)).thenReturn(Optional.empty()).thenReturn(Optional.of(winner));
         when(cacheMapper.toShow(1, winner)).thenReturn(winnerShow);
+        var comments = List.of(new CommentResponse("Winner comment", 5));
+        when(commentQueryService.findByShowIds(List.of(1))).thenReturn(Map.of(1, comments));
 
-        assertThat(service.getShow(1)).isSameAs(winnerShow);
+        assertEnrichedCopy(service.getShow(1), winnerShow, winnerShow.deepCopy(), comments);
         assertThat(show.path("name").textValue()).isEqualTo("Candidate");
+        assertThat(show.has("comments")).isFalse();
+        assertThat(winner.showJson()).isEqualTo(winnerShow.toString());
 
-        var order = inOrder(repository, client, cacheMapper);
+        var order = inOrder(repository, client, cacheMapper, commentQueryService, detailMapper);
         order.verify(repository).findById(1);
         order.verify(client).getShow(1);
         order.verify(cacheMapper).toDocument(1, show);
         order.verify(repository).insert(document);
         order.verify(repository).findById(1);
         order.verify(cacheMapper).toShow(1, winner);
+        order.verify(commentQueryService).findByShowIds(List.of(1));
+        order.verify(detailMapper).toResponse(winnerShow, comments);
         verifyNoMoreInteractions(client);
         verifyNoInteractions(mapper);
     }
@@ -376,6 +400,79 @@ class ShowServiceTest {
 
         verifyDuplicateInteractions(show, document);
         verify(cacheMapper).toShow(1, winner);
+    }
+
+    @ParameterizedTest
+    @EnumSource(CommentReadException.Reason.class)
+    void propagatesDetailCommentErrorsAfterInsertionWithoutRollback(CommentReadException.Reason reason) {
+        var show = JsonNodeFactory.instance.objectNode().put("id", 1);
+        var document = prepareMiss(show);
+        var error = new CommentReadException(reason, "Internal diagnostic", new IllegalStateException("Cause"));
+        when(commentQueryService.findByShowIds(List.of(1))).thenThrow(error);
+
+        assertThatThrownBy(() -> service.getShow(1)).isSameAs(error);
+
+        var order = inOrder(repository, client, cacheMapper, commentQueryService);
+        order.verify(repository).findById(1);
+        order.verify(client).getShow(1);
+        order.verify(cacheMapper).toDocument(1, show);
+        order.verify(repository).insert(document);
+        order.verify(commentQueryService).findByShowIds(List.of(1));
+        verifyNoInteractions(detailMapper);
+        assertThat(show.has("comments")).isFalse();
+        assertThat(document.showJson()).isEqualTo(show.toString());
+    }
+
+    @ParameterizedTest
+    @EnumSource(CommentReadException.Reason.class)
+    void propagatesDetailCommentErrorsOnCacheHit(CommentReadException.Reason reason) {
+        var show = JsonNodeFactory.instance.objectNode().put("id", 1);
+        var document = new CachedShowDocument(1, show.toString());
+        var error = new CommentReadException(reason, "Internal diagnostic");
+        when(repository.findById(1)).thenReturn(Optional.of(document));
+        when(cacheMapper.toShow(1, document)).thenReturn(show);
+        when(commentQueryService.findByShowIds(List.of(1))).thenThrow(error);
+
+        assertThatThrownBy(() -> service.getShow(1)).isSameAs(error);
+
+        verify(repository).findById(1);
+        verify(cacheMapper).toShow(1, document);
+        verify(commentQueryService).findByShowIds(List.of(1));
+        verifyNoInteractions(client, detailMapper);
+        assertThat(show.has("comments")).isFalse();
+    }
+
+    @Test
+    void replacesProviderCommentsOnlyInResponseAndPersistsOriginal() {
+        var show = JsonNodeFactory.instance.objectNode().put("id", 1).put("comments", "Provider value");
+        var snapshot = show.deepCopy();
+        var document = prepareMiss(show);
+        var repeated = new CommentResponse("Same text", 5);
+        var comments = List.of(repeated, repeated, new CommentResponse("Last", 0));
+        when(commentQueryService.findByShowIds(List.of(1))).thenReturn(Map.of(1, comments));
+
+        assertEnrichedCopy(service.getShow(1), show, snapshot, comments);
+
+        verifyMissInteractions(show, document);
+        verify(commentQueryService).findByShowIds(List.of(1));
+        verify(detailMapper).toResponse(show, comments);
+        assertThat(document.showJson()).isEqualTo(snapshot.toString());
+    }
+
+    private static Stream<List<CommentResponse>> detailComments() {
+        return Stream.of(List.of(), List.of(new CommentResponse("Second", 4), new CommentResponse("First", 5)));
+    }
+
+    private void assertEnrichedCopy(ObjectNode response, ObjectNode original, ObjectNode snapshot,
+                                    List<CommentResponse> comments) {
+        assertThat(response).isNotSameAs(original);
+        assertThat(original).isEqualTo(snapshot);
+        assertThat(response.get("comments")).isEqualTo(new ObjectMapper().valueToTree(comments));
+        var withoutComments = response.deepCopy();
+        withoutComments.remove("comments");
+        var expectedOriginalFields = snapshot.deepCopy();
+        expectedOriginalFields.remove("comments");
+        assertThat(withoutComments).isEqualTo(expectedOriginalFields);
     }
 
     private CachedShowDocument prepareMiss(ObjectNode show) {

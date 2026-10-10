@@ -14,6 +14,8 @@ import com.example.tvmazeapi.service.ShowService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
@@ -23,6 +25,7 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.util.List;
+import java.util.stream.Stream;
 
 import static org.hamcrest.Matchers.*;
 import static org.mockito.Mockito.verify;
@@ -65,22 +68,47 @@ class ShowControllerTest {
         verify(service).search("girls");
     }
 
-    @Test
-    void returnsCompleteShowWithOriginalJsonStructure() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void returnsCompleteShowWithOriginalJsonStructureAndComments(boolean hasComments) throws Exception {
         ObjectNode show = (ObjectNode) objectMapper.readTree("""
-                {"id":1,"name":"Show","summary":"<p>HTML</p>","ended":null,
-                 "network":{"country":{"code":"US"}},"genres":["Drama","Comedy"],
-                 "additional":{"values":[null,1,{"enabled":true}]}}
+                {"id":1,"url":"https://example.test/shows/1","name":"Serie 日本語 🎬",
+                 "type":"Scripted","language":"English","summary":"<p>Niña &amp; 日本語 🎬</p>",
+                 "ended":null,"webChannel":null,"genres":["Drama","Comedy"],
+                 "schedule":{"time":"22:00","days":["Monday","Friday"]},
+                 "rating":{"average":8.5},"network":{"name":"Canal",
+                 "country":{"name":"United States","code":"US","timezone":"America/New_York"}},
+                 "image":{"medium":"https://example.test/medium.jpg","original":null},
+                 "_links":{"self":{"href":"https://example.test/shows/1"}},
+                 "additional":{"values":[null,1,{"enabled":true,"nested":["á",{"value":3.5}]}]}}
                 """);
+        var originalFields = show.deepCopy();
+        var comments = hasComments
+                ? List.of(new CommentResponse("  Excelente 日本語 <b>🎬</b>  ", 5),
+                          new CommentResponse("Otra opinión", 0))
+                : List.<CommentResponse>of();
+        show.set("comments", objectMapper.valueToTree(comments));
         ObjectNode snapshot = show.deepCopy();
         when(service.getShow(1)).thenReturn(show);
 
         var result = mvc.perform(get("/api/shows/1"))
                 .andExpect(status().isOk())
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.comments", hasSize(comments.size())))
                 .andReturn();
 
-        assertThat(objectMapper.readTree(result.getResponse().getContentAsString())).isEqualTo(snapshot);
+        ObjectNode response = (ObjectNode) objectMapper.readTree(result.getResponse().getContentAsByteArray());
+        assertThat(response).isEqualTo(snapshot);
+        assertThat(response.get("comments").isArray()).isTrue();
+        assertThat(response.get("comments").isNull()).isFalse();
+        for (var comment : response.get("comments")) {
+            assertThat(comment.size()).isEqualTo(2);
+            assertThat(comment.has("comment")).isTrue();
+            assertThat(comment.has("rating")).isTrue();
+        }
+        ObjectNode responseFields = response.deepCopy();
+        responseFields.remove("comments");
+        assertThat(responseFields).isEqualTo(originalFields);
         assertThat(show).isEqualTo(snapshot);
         verify(service).getShow(1);
         verifyNoMoreInteractions(service);
@@ -205,14 +233,20 @@ class ShowControllerTest {
     }
 
     @ParameterizedTest
-    @EnumSource(CommentReadException.Reason.class)
-    void mapsCommentReadErrorsWithoutPartialResultsOrSensitiveData(CommentReadException.Reason reason)
+    @MethodSource("commentReadErrorScenarios")
+    void mapsCommentReadErrorsWithoutPartialResultsOrSensitiveData(CommentReadException.Reason reason,
+                                                                   String path)
             throws Exception {
         String diagnostic = "TECHNICAL mongodb+srv://private_user:private_password@internal.example/tvmaze"
                 + " document: {\"internalComment\":\"privatePayload\"}";
         var cause = new IllegalStateException("INTERNAL stack detail");
         var exception = new CommentReadException(reason, diagnostic, cause);
-        when(service.search("girls")).thenThrow(exception);
+        boolean search = path.endsWith("/search");
+        if (search) {
+            when(service.search("girls")).thenThrow(exception);
+        } else {
+            when(service.getShow(1)).thenThrow(exception);
+        }
         int expectedStatus = reason == CommentReadException.Reason.UNAVAILABLE ? 503 : 500;
         String expectedTitle = reason == CommentReadException.Reason.UNAVAILABLE
                 ? "Service Unavailable" : "Internal Server Error";
@@ -220,7 +254,11 @@ class ShowControllerTest {
                 ? "Los comentarios no están disponibles temporalmente."
                 : "No fue posible recuperar correctamente los comentarios almacenados.";
 
-        mvc.perform(get("/api/shows/search").param("search_query", "girls"))
+        var request = get(path);
+        if (search) {
+            request.param("search_query", "girls");
+        }
+        mvc.perform(request)
                 .andExpect(status().is(expectedStatus))
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
                 .andExpect(jsonPath("$", aMapWithSize(5)))
@@ -228,7 +266,10 @@ class ShowControllerTest {
                 .andExpect(jsonPath("$.title").value(expectedTitle))
                 .andExpect(jsonPath("$.status").value(expectedStatus))
                 .andExpect(jsonPath("$.detail").value(expectedDetail))
-                .andExpect(jsonPath("$.instance").value("/api/shows/search"))
+                .andExpect(jsonPath("$.instance").value(path))
+                .andExpect(jsonPath("$.id").doesNotExist())
+                .andExpect(jsonPath("$.name").doesNotExist())
+                .andExpect(jsonPath("$.summary").doesNotExist())
                 .andExpect(jsonPath("$.comments").doesNotExist())
                 .andExpect(jsonPath("$.shows").doesNotExist())
                 .andExpect(jsonPath("$.trace").doesNotExist())
@@ -244,8 +285,18 @@ class ShowControllerTest {
                 .andExpect(content().string(not(containsString("INTERNAL"))))
                 .andExpect(content().string(not(containsString("IllegalStateException"))));
         assertThat(exception.getCause()).isSameAs(cause);
-        verify(service).search("girls");
+        if (search) {
+            verify(service).search("girls");
+        } else {
+            verify(service).getShow(1);
+        }
         verifyNoMoreInteractions(service);
+    }
+
+    private static Stream<Arguments> commentReadErrorScenarios() {
+        return Stream.of(CommentReadException.Reason.values())
+                .flatMap(reason -> Stream.of("/api/shows/search", "/api/shows/1")
+                        .map(path -> Arguments.of(reason, path)));
     }
 
     @Test
