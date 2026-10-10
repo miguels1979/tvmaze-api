@@ -25,6 +25,21 @@ import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExcep
 @RestControllerAdvice
 public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 
+    @ExceptionHandler(CommentReadException.class)
+    public ProblemDetail handleCommentReadException(CommentReadException exception) {
+        HttpStatus status = switch (exception.getReason()) {
+            case UNAVAILABLE -> HttpStatus.SERVICE_UNAVAILABLE;
+            case INVALID_DATA -> HttpStatus.INTERNAL_SERVER_ERROR;
+        };
+
+        String detail = switch (exception.getReason()) {
+            case UNAVAILABLE -> "Los comentarios no están disponibles temporalmente.";
+            case INVALID_DATA -> "No fue posible recuperar correctamente los comentarios almacenados.";
+        };
+
+        return ProblemDetail.forStatusAndDetail(status, detail);
+    }
+
     @ExceptionHandler(CommentPersistenceException.class)
     public ProblemDetail handleCommentPersistenceException(CommentPersistenceException exception) {
         return ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE,

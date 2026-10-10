@@ -22,13 +22,16 @@ public class ShowService {
     private final ShowSearchMapper showSearchMapper;
     private final CachedShowRepository cachedShowRepository;
     private final ShowCacheMapper showCacheMapper;
+    private final CommentQueryService commentQueryService;
 
     public ShowService(TvMazeClient tvMazeClient, ShowSearchMapper showSearchMapper,
-                       CachedShowRepository cachedShowRepository, ShowCacheMapper showCacheMapper) {
+                       CachedShowRepository cachedShowRepository, ShowCacheMapper showCacheMapper,
+                       CommentQueryService commentQueryService) {
         this.tvMazeClient = tvMazeClient;
         this.showSearchMapper = showSearchMapper;
         this.cachedShowRepository = cachedShowRepository;
         this.showCacheMapper = showCacheMapper;
+        this.commentQueryService = commentQueryService;
     }
 
     public List<ShowSearchResponse> search(String searchQuery) {
@@ -37,8 +40,17 @@ public class ShowService {
         }
 
         String query = searchQuery.strip();
-        return tvMazeClient.searchShows(query).stream()
+        List<ShowSearchResponse> responses = tvMazeClient.searchShows(query).stream()
                 .map(result -> showSearchMapper.toResponse(result.show()))
+                .toList();
+        if (responses.isEmpty()) {
+            return List.of();
+        }
+        List<Integer> showIds = responses.stream().map(ShowSearchResponse::id).toList();
+        var commentsByShowId = commentQueryService.findByShowIds(showIds);
+        return responses.stream()
+                .map(response -> response.withComments(
+                        commentsByShowId.getOrDefault(response.id(), List.of())))
                 .toList();
     }
 

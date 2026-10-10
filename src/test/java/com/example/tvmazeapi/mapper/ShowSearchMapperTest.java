@@ -25,7 +25,8 @@ class ShowSearchMapperTest {
         assertThat(response.channel()).isEqualTo("HBO");
         assertThat(response.summary()).isEqualTo("<p>Original & text</p>");
         assertThat(response.genres()).containsExactly("Drama", "Comedy");
-        assertThat(json.valueToTree(response).size()).isEqualTo(5);
+        assertThat(json.valueToTree(response).size()).isEqualTo(6);
+        assertThat(response.comments()).isEmpty();
     }
 
     @ParameterizedTest

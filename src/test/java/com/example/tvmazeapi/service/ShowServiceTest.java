@@ -18,6 +18,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 import com.example.tvmazeapi.client.TvMazeClient;
 import com.example.tvmazeapi.dto.external.TvMazeSearchResult;
 import com.example.tvmazeapi.dto.response.ShowSearchResponse;
+import com.example.tvmazeapi.dto.response.CommentResponse;
+import com.example.tvmazeapi.exception.CommentReadException;
 import com.example.tvmazeapi.mapper.ShowSearchMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import org.junit.jupiter.api.Test;
@@ -27,6 +29,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.*;
@@ -38,29 +41,32 @@ class ShowServiceTest {
     @Mock private ShowSearchMapper mapper;
     @Mock private CachedShowRepository repository;
     @Mock private ShowCacheMapper cacheMapper;
+    @Mock private CommentQueryService commentQueryService;
     @InjectMocks private ShowService service;
 
     @AfterEach
     void verifiesNoUnexpectedCacheInteractions() {
-        verifyNoMoreInteractions(repository, cacheMapper);
+        verifyNoMoreInteractions(repository, cacheMapper, commentQueryService);
     }
 
     @Test
     void stripsOuterSpacesCallsClientOnceAndMapsInOrder() {
         var first = JsonNodeFactory.instance.objectNode().put("id", 2);
         var second = JsonNodeFactory.instance.objectNode().put("id", 1);
-        var firstResponse = new ShowSearchResponse(2, "First", null, null, List.of());
-        var secondResponse = new ShowSearchResponse(1, "Second", null, null, List.of());
+        var firstResponse = new ShowSearchResponse(2, "First", null, null, List.of(), List.of());
+        var secondResponse = new ShowSearchResponse(1, "Second", null, null, List.of(), List.of());
         when(client.searchShows("law & order")).thenReturn(List.of(
                 new TvMazeSearchResult(first), new TvMazeSearchResult(second)));
         when(mapper.toResponse(first)).thenReturn(firstResponse);
         when(mapper.toResponse(second)).thenReturn(secondResponse);
+        when(commentQueryService.findByShowIds(List.of(2, 1))).thenReturn(Map.of());
 
         assertThat(service.search(" \t law & order \n")).containsExactly(firstResponse, secondResponse);
-        var order = inOrder(client, mapper);
+        var order = inOrder(client, mapper, commentQueryService);
         order.verify(client).searchShows("law & order");
         order.verify(mapper).toResponse(first);
         order.verify(mapper).toResponse(second);
+        order.verify(commentQueryService).findByShowIds(List.of(2, 1));
         verifyNoMoreInteractions(client, mapper);
     }
 
@@ -89,6 +95,83 @@ class ShowServiceTest {
         when(client.searchShows("girls")).thenReturn(List.of(new TvMazeSearchResult(show)));
         when(mapper.toResponse(show)).thenThrow(error);
         assertThatThrownBy(() -> service.search("girls")).isSameAs(error);
+    }
+
+    @Test
+    void enrichesOriginalOrderAndRepeatedIdsWithoutChangingOriginalObjects() {
+        var first = JsonNodeFactory.instance.objectNode().put("id", 2).put("extra", "original");
+        var second = JsonNodeFactory.instance.objectNode().put("id", 1);
+        var third = JsonNodeFactory.instance.objectNode().put("id", 2).put("name", "Repeated");
+        var fourth = JsonNodeFactory.instance.objectNode().put("id", 3);
+        var snapshots = List.of(first.deepCopy(), second.deepCopy(), third.deepCopy(), fourth.deepCopy());
+        var firstResponse = new ShowSearchResponse(2, "First", "Network", "<p>HTML 日本語</p>",
+                List.of("Drama", "Comedy"), List.of());
+        var secondResponse = new ShowSearchResponse(1, "Second", null, null, List.of(), List.of());
+        var thirdResponse = new ShowSearchResponse(2, "Repeated", null, "<p>Other</p>", List.of("Drama"), List.of());
+        var fourthResponse = new ShowSearchResponse(3, "Without comments", null, null, List.of(), List.of());
+        var originals = List.of(firstResponse, secondResponse, thirdResponse, fourthResponse);
+        var commentsForTwo = List.of(new CommentResponse("  Excellent 😀  ", 5), new CommentResponse("Good", 4));
+        var commentsForOne = List.of(new CommentResponse("Different", 0));
+        when(client.searchShows("girls")).thenReturn(List.of(new TvMazeSearchResult(first),
+                new TvMazeSearchResult(second), new TvMazeSearchResult(third), new TvMazeSearchResult(fourth)));
+        when(mapper.toResponse(first)).thenReturn(firstResponse);
+        when(mapper.toResponse(second)).thenReturn(secondResponse);
+        when(mapper.toResponse(third)).thenReturn(thirdResponse);
+        when(mapper.toResponse(fourth)).thenReturn(fourthResponse);
+        when(commentQueryService.findByShowIds(List.of(2, 1, 2, 3)))
+                .thenReturn(Map.of(2, commentsForTwo, 1, commentsForOne));
+
+        var results = service.search("girls");
+        assertThat(results).containsExactly(firstResponse.withComments(commentsForTwo),
+                secondResponse.withComments(commentsForOne), thirdResponse.withComments(commentsForTwo), fourthResponse);
+        for (int index = 0; index < originals.size(); index++) {
+            var original = originals.get(index);
+            var result = results.get(index);
+            assertThat(result).isNotSameAs(original);
+            assertThat(result.id()).isEqualTo(original.id());
+            assertThat(result.name()).isEqualTo(original.name());
+            assertThat(result.channel()).isEqualTo(original.channel());
+            assertThat(result.summary()).isEqualTo(original.summary());
+            assertThat(result.genres()).isEqualTo(original.genres());
+            assertThat(original.comments()).isEmpty();
+        }
+        assertThat(List.of(first, second, third, fourth)).containsExactlyElementsOf(snapshots);
+        var order = inOrder(client, mapper, commentQueryService);
+        order.verify(client).searchShows("girls");
+        order.verify(mapper).toResponse(first);
+        order.verify(mapper).toResponse(second);
+        order.verify(mapper).toResponse(third);
+        order.verify(mapper).toResponse(fourth);
+        order.verify(commentQueryService).findByShowIds(List.of(2, 1, 2, 3));
+        verifyNoMoreInteractions(client, mapper);
+    }
+
+    @ParameterizedTest
+    @EnumSource(CommentReadException.Reason.class)
+    void propagatesCommentReadErrorsUnchanged(CommentReadException.Reason reason) {
+        var show = JsonNodeFactory.instance.objectNode().put("id", 1);
+        var response = new ShowSearchResponse(1, "Show", null, null, List.of(), List.of());
+        var error = new CommentReadException(reason, "Internal diagnostic", new IllegalStateException("Cause"));
+        when(client.searchShows("girls")).thenReturn(List.of(new TvMazeSearchResult(show)));
+        when(mapper.toResponse(show)).thenReturn(response);
+        when(commentQueryService.findByShowIds(List.of(1))).thenThrow(error);
+        assertThatThrownBy(() -> service.search("girls")).isSameAs(error);
+        verify(client).searchShows("girls");
+        verify(mapper).toResponse(show);
+        verify(commentQueryService).findByShowIds(List.of(1));
+        assertThat(response.comments()).isEmpty();
+    }
+
+    @Test
+    void validatesEveryResultBeforeQueryingComments() {
+        var valid = JsonNodeFactory.instance.objectNode().put("id", 1);
+        var invalid = JsonNodeFactory.instance.objectNode();
+        when(client.searchShows("girls")).thenReturn(List.of(new TvMazeSearchResult(valid), new TvMazeSearchResult(invalid)));
+        when(mapper.toResponse(valid)).thenReturn(new ShowSearchResponse(1, "Show", null, null, List.of(), List.of()));
+        var error = new TvMazeClientException(TvMazeClientException.Reason.BAD_RESPONSE, "Invalid second show");
+        when(mapper.toResponse(invalid)).thenThrow(error);
+        assertThatThrownBy(() -> service.search("girls")).isSameAs(error);
+        verifyNoInteractions(commentQueryService);
     }
 
     @Test

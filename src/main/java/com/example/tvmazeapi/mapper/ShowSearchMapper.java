@@ -32,7 +32,8 @@ public class ShowSearchMapper {
                 name,
                 resolveChannel(show),
                 readNullableText(show, "summary"),
-                readGenres(show)
+                readGenres(show),
+                List.of()
         );
     }
 

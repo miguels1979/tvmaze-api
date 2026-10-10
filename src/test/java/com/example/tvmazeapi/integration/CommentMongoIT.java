@@ -20,6 +20,7 @@ import org.springframework.data.mongodb.repository.support.MappingMongoEntityInf
 import org.springframework.data.mongodb.repository.support.SimpleMongoRepository;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
@@ -140,9 +141,20 @@ class CommentMongoIT {
 
     private static class IsolatedCommentRepository extends SimpleMongoRepository<CommentDocument, String>
             implements CommentRepository {
+        private final MongoTemplate template;
+        private final String collection;
+
         IsolatedCommentRepository(MappingMongoEntityInformation<CommentDocument, String> information,
                                   MongoTemplate template) {
             super(information, template);
+            this.template = template;
+            this.collection = information.getCollectionName();
+        }
+
+        @Override
+        public List<CommentDocument> findByShowIdIn(Collection<Integer> showIds) {
+            return template.find(Query.query(Criteria.where("showId").in(showIds)),
+                    CommentDocument.class, collection);
         }
     }
 }

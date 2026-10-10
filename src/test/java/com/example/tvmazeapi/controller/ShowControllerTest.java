@@ -1,6 +1,8 @@
 package com.example.tvmazeapi.controller;
 
 import com.example.tvmazeapi.dto.response.ShowSearchResponse;
+import com.example.tvmazeapi.dto.response.CommentResponse;
+import com.example.tvmazeapi.exception.CommentReadException;
 
 import com.example.tvmazeapi.exception.GlobalExceptionHandler;
 import com.example.tvmazeapi.exception.ShowCacheException;
@@ -39,20 +41,22 @@ class ShowControllerTest {
     @MockitoBean private ShowService service;
 
     @Test
-    void returnsExactlyFiveFieldsIncludingNullValues() throws Exception {
+    void returnsExactlySixFieldsIncludingNullValuesAndEmptyComments() throws Exception {
         when(service.search("girls")).thenReturn(List.of(
-                new ShowSearchResponse(1, "Girls", "HBO", "<p>HTML</p>", List.of("Drama")),
-                new ShowSearchResponse(2, "Other", null, null, List.of())));
+                new ShowSearchResponse(1, "Girls", "HBO", "<p>HTML</p>", List.of("Drama"), List.of()),
+                new ShowSearchResponse(2, "Other", null, null, List.of(), List.of())));
         mvc.perform(get("/api/shows/search").param("search_query", "girls"))
                 .andExpect(status().isOk()).andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
                 .andExpect(jsonPath("$", hasSize(2)))
-                .andExpect(jsonPath("$[0]", aMapWithSize(5)))
+                .andExpect(jsonPath("$[0]", aMapWithSize(6)))
+                .andExpect(jsonPath("$[0].comments", empty()))
                 .andExpect(jsonPath("$[0].id").value(1))
                 .andExpect(jsonPath("$[0].name").value("Girls"))
                 .andExpect(jsonPath("$[0].channel").value("HBO"))
                 .andExpect(jsonPath("$[0].summary").value("<p>HTML</p>"))
                 .andExpect(jsonPath("$[0].genres").value(contains("Drama")))
-                .andExpect(jsonPath("$[1]", aMapWithSize(5)))
+                .andExpect(jsonPath("$[1]", aMapWithSize(6)))
+                .andExpect(jsonPath("$[1].comments", empty()))
                 .andExpect(jsonPath("$[1]", hasKey("channel")))
                 .andExpect(jsonPath("$[1].channel").value(nullValue()))
                 .andExpect(jsonPath("$[1]", hasKey("summary")))
@@ -196,6 +200,76 @@ class ShowControllerTest {
         when(service.search("girls")).thenReturn(List.of());
         mvc.perform(get("/api/shows/search").param("search_query", "girls"))
                 .andExpect(status().isOk()).andExpect(content().json("[]"));
+        verify(service).search("girls");
+        verifyNoMoreInteractions(service);
+    }
+
+    @ParameterizedTest
+    @EnumSource(CommentReadException.Reason.class)
+    void mapsCommentReadErrorsWithoutPartialResultsOrSensitiveData(CommentReadException.Reason reason)
+            throws Exception {
+        String diagnostic = "TECHNICAL mongodb+srv://private_user:private_password@internal.example/tvmaze"
+                + " document: {\"internalComment\":\"privatePayload\"}";
+        var cause = new IllegalStateException("INTERNAL stack detail");
+        var exception = new CommentReadException(reason, diagnostic, cause);
+        when(service.search("girls")).thenThrow(exception);
+        int expectedStatus = reason == CommentReadException.Reason.UNAVAILABLE ? 503 : 500;
+        String expectedTitle = reason == CommentReadException.Reason.UNAVAILABLE
+                ? "Service Unavailable" : "Internal Server Error";
+        String expectedDetail = reason == CommentReadException.Reason.UNAVAILABLE
+                ? "Los comentarios no están disponibles temporalmente."
+                : "No fue posible recuperar correctamente los comentarios almacenados.";
+
+        mvc.perform(get("/api/shows/search").param("search_query", "girls"))
+                .andExpect(status().is(expectedStatus))
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$", aMapWithSize(5)))
+                .andExpect(jsonPath("$.type").value("about:blank"))
+                .andExpect(jsonPath("$.title").value(expectedTitle))
+                .andExpect(jsonPath("$.status").value(expectedStatus))
+                .andExpect(jsonPath("$.detail").value(expectedDetail))
+                .andExpect(jsonPath("$.instance").value("/api/shows/search"))
+                .andExpect(jsonPath("$.comments").doesNotExist())
+                .andExpect(jsonPath("$.shows").doesNotExist())
+                .andExpect(jsonPath("$.trace").doesNotExist())
+                .andExpect(jsonPath("$.exception").doesNotExist())
+                .andExpect(jsonPath("$.cause").doesNotExist())
+                .andExpect(content().string(not(containsString("TECHNICAL"))))
+                .andExpect(content().string(not(containsString("mongodb+srv"))))
+                .andExpect(content().string(not(containsString("private_user"))))
+                .andExpect(content().string(not(containsString("private_password"))))
+                .andExpect(content().string(not(containsString("internal.example"))))
+                .andExpect(content().string(not(containsString("internalComment"))))
+                .andExpect(content().string(not(containsString("privatePayload"))))
+                .andExpect(content().string(not(containsString("INTERNAL"))))
+                .andExpect(content().string(not(containsString("IllegalStateException"))));
+        assertThat(exception.getCause()).isSameAs(cause);
+        verify(service).search("girls");
+        verifyNoMoreInteractions(service);
+    }
+
+    @Test
+    void returnsSearchWithCommentsAndExactlySixFields() throws Exception {
+        when(service.search("girls")).thenReturn(List.of(new ShowSearchResponse(
+                1, "Girls", null, "<p>Original HTML</p>", List.of("Drama"),
+                List.of(new CommentResponse("Excellent", 5), new CommentResponse("Good", 4)))));
+        mvc.perform(get("/api/shows/search").param("search_query", "girls"))
+                .andExpect(status().isOk())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$", hasSize(1)))
+                .andExpect(jsonPath("$[0]", aMapWithSize(6)))
+                .andExpect(jsonPath("$[0].id").value(1))
+                .andExpect(jsonPath("$[0].name").value("Girls"))
+                .andExpect(jsonPath("$[0].channel").value(nullValue()))
+                .andExpect(jsonPath("$[0].summary").value("<p>Original HTML</p>"))
+                .andExpect(jsonPath("$[0].genres").value(contains("Drama")))
+                .andExpect(jsonPath("$[0].comments", hasSize(2)))
+                .andExpect(jsonPath("$[0].comments[0]", aMapWithSize(2)))
+                .andExpect(jsonPath("$[0].comments[0].comment").value("Excellent"))
+                .andExpect(jsonPath("$[0].comments[0].rating").value(5))
+                .andExpect(jsonPath("$[0].comments[1]", aMapWithSize(2)))
+                .andExpect(jsonPath("$[0].comments[1].comment").value("Good"))
+                .andExpect(jsonPath("$[0].comments[1].rating").value(4));
         verify(service).search("girls");
         verifyNoMoreInteractions(service);
     }
