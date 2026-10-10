@@ -1,5 +1,8 @@
 package com.example.tvmazeapi.exception;
 
+import jakarta.validation.ConstraintViolationException;
+import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.web.bind.MethodArgumentNotValidException;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Positive;
 import org.springframework.beans.TypeMismatchException;
@@ -21,6 +24,36 @@ import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExcep
 
 @RestControllerAdvice
 public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
+
+    @ExceptionHandler(CommentPersistenceException.class)
+    public ProblemDetail handleCommentPersistenceException(CommentPersistenceException exception) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE,
+                "No fue posible guardar el comentario temporalmente.");
+    }
+
+    @ExceptionHandler(ConstraintViolationException.class)
+    public ProblemDetail handleConstraintViolationException(ConstraintViolationException exception) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST,
+                "Los datos de la solicitud no cumplen las restricciones requeridas.");
+    }
+
+    @Override
+    protected ResponseEntity<Object> handleMethodArgumentNotValid(
+            MethodArgumentNotValidException exception, HttpHeaders headers,
+            HttpStatusCode status, WebRequest request) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST,
+                "Los datos del comentario no cumplen las restricciones requeridas.");
+        return handleExceptionInternal(exception, problem, headers, HttpStatus.BAD_REQUEST, request);
+    }
+
+    @Override
+    protected ResponseEntity<Object> handleHttpMessageNotReadable(
+            HttpMessageNotReadableException exception, HttpHeaders headers,
+            HttpStatusCode status, WebRequest request) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST,
+                "El cuerpo de la solicitud contiene datos no válidos.");
+        return handleExceptionInternal(exception, problem, headers, HttpStatus.BAD_REQUEST, request);
+    }
 
     @ExceptionHandler(ShowCacheException.class)
     public ProblemDetail handleShowCacheException(ShowCacheException exception) {
@@ -121,6 +154,12 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     }
 
     private String validationDetail(HandlerMethodValidationException exception) {
+        for (var result : exception.getParameterValidationResults()) {
+            if (result.getMethodParameter().hasParameterAnnotation(
+                    org.springframework.web.bind.annotation.RequestBody.class)) {
+                return "Los datos del comentario no cumplen las restricciones requeridas.";
+            }
+        }
         for (var result : exception.getParameterValidationResults()) {
             MethodParameter parameter = result.getMethodParameter();
             String name = requestParameterName(parameter);
